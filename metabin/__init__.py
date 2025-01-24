@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Translate Python struct packing characters (keys)
-<https://docs.python.org/3/library/struct.html> (same for Python 2)
-to ImHex Pattern Language (values) for generating ImHex project files.
+Generate binary while documenting the resulting bytes.
 
-License: [MIT License](https://github.com/Hierosoft/metabin#MIT-1-ov-file)
+How it works: Generate ImHex Pattern Language from Python struct pack
+commands (<https://docs.python.org/3/library/struct.html>) when you use
+the included pack method that accepts additional metadata.
 
 The most up-to-date version of this module can be obtained at:
 <https://github.com/Hierosoft/metabin>.
 
 The ImHex Pattern Language is documented at
 <https://blog.xorhex.com/blog/quickimhexpatternyaratutorial/>.
+
+License: [MIT License](https://github.com/Hierosoft/metabin#MIT-1-ov-file)
 """
 from __future__ import print_function
 
@@ -21,7 +23,7 @@ import sys
 
 from pprint import pformat
 
-imhex_keywords = {
+imhex_keywords = {  # Python struct syntax to ImHex Pattern Language
     ">": "be",  # big endian (most significant byte is last) such as PIC-33
     "<": "le",  # little endian
     "B": "u8",
@@ -112,12 +114,13 @@ class MetaBinFunction:
 
     Attributes:
         name (string): The name of the function.
-        lines (list[string]): The lines that go inside of the function
-            (not indented--indent will be added on export).
+        metas (list[dict]): The descriptions of attributes that go
+            inside of the function (not indented--indent will be added
+            on export).
     """
     def __init__(self):
         self.name = None
-        self.lines = []
+        self.metas = []  # formerly lines: list[str]
 
 
 class MetaBinStruct:
@@ -138,20 +141,51 @@ class MetaBinStruct:
 
     Attributes:
         name (string): The name of the struct.
-        lines (list[string]): The lines that go inside of the structure
-            (not indented--indent will be added on export).
-
+        metas (list[string]): The descriptions of attributes that go
+            inside of the structure (not indented--indent will be added
+            on export).
     """
     def __init__(self):
         self.name = None
-        self.lines = []
+        self.metas = []
 
 
 class Packable:
+    """Wrapper for struct to collect metadata describing the resulting binary.
+    (can be later combined into global offsets in order to describe a
+    larger combined binary).
+
+    Attributes:
+        chunks (list[bytes]): results of each pack call.
+        metas (list[dict]): information about each pack call.
+        bad_keys (list[Any]): user-defined field for debugging
+        exceptions (list[Exception]): user-defined field for debugging
+    """
     def __init__(self):
         # self.data = NO_BYTES
         self.chunks = []
-        self.lines = []
+        self.metas = []
+        self.bad_keys = []
+        self.exceptions = []
+
+    @classmethod
+    def meta_to_imhex(cls, meta):
+        """Convert the data pattern to ImHex Pattern Language"""
+        line = "{} {}".format(
+            chars_to_imhex(meta['pattern']),
+            meta['name'],
+        )
+        if meta.get('count') is not None:
+            line += "[{}]".format(meta['count'])
+        if meta.get('value') is not None:
+            # line += "  // = {}".format(meta['value'].replace("\n", "\\n"))
+            # ^ "//" starts inline comment in ImHex Pattern Language.
+            # but @ makes a tooltip visible within the editor (ImHex):
+            line += ' @ "{}"'.format(meta['value'].replace("\n", "\\n"))
+        return line + ";"
+
+    def to_imhex(self):
+        return Packable.meta_to_imhex(self.meta)
 
     def pack(self, pattern, value, name, count=None):
         """Pack literal or virtual data.
@@ -163,26 +197,28 @@ class Packable:
             count (int, optional): Skip the caching of data and instead
                 only describe the structure. Defaults to None.
         """
-        curframe = inspect.currentframe()
-        calframe = inspect.getouterframes(curframe, 2)
-        caller_name = calframe[1][3]
-        if count is not None:
-            line = "{} {}".format(chars_to_imhex(pattern), name)
-        else:
-            line = "{} {}[{}]".format(chars_to_imhex(pattern), name, count)
-        echo0("packing {}  // = {}".format(line, value))  # FIXME: Use logging.debug
-        # ^ "//" is the inline comment delimiter for ImHex Pattern Language.
-        self.lines.append(line)
+        current_frame = inspect.currentframe()
+        call_frame = inspect.getouterframes(current_frame, 2)
+        caller_name = call_frame[1][3]
+        meta = {'pattern': pattern, 'value': value, 'name': name,
+                'count': count}
+        self.metas.append(meta)
         # self.data += struct.pack(pattern, value)
         if count is not None:
             # Allow blank value to same RAM such as to only
             #   save the pattern in the case of a data array.
             return
+        struct_error = None
         try:
             self.chunks.append(struct.pack(pattern, value))
-        except struct.error:
-            echo0("packing error in {}".format(caller_name))
-            raise
+        except struct.error as ex:
+            # reraise
+            struct_error = (
+                "{} (packing error in {}, name={}):"
+                .format(ex, caller_name, name))
+        if struct_error:
+            # reraise but with extra information
+            raise struct.error(struct_error)
 
     @property
     def data(self):
